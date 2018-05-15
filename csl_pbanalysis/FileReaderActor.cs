@@ -52,17 +52,18 @@ namespace csl_pbanalysis
         private readonly string FILE_COMMANDS =
             @"^\s*(?<command>(OPEN|OPENPATH|READ[VULT]*|CALL\s+OPEN\.FILE\.SUB|READSEQ|WRITE[VULT]*|WRITESEQ|EXECUTE|CHAIN|[\$]*INCLUDE|MATREAD[U]?|MATWRITE[U]?|CALL|ENTER|PROGRAM|SYSTEM|OPENSEQ))[\s|\(]+.*\n";
         private readonly string OPEN_COMMAND =
-            @"^\s*(OPEN|OPENSEQ|OPENPATH)\s+(?<filename>[^\s]+)\s+TO\s+(?<to>[^\s\(\)]+)(?<isarray>\(\S+\))";
+            @"^\s*(OPEN|OPENSEQ|OPENPATH)\s+(?<filename>.+)\s+TO\s+(?<to>[^\s\(\)]+)(?<isarray>\(\S+\))?";
+//            @"^\s*(OPEN|OPENSEQ|OPENPATH)\s+(?<filename>[^\s]+)\s+TO\s+(?<to>[^\s\(\)]+)(?<isarray>\(\S+\))?";
         private readonly string OPEN_FILE_SUB_COMMAND =
             @"^\s*(CALL\s+OPEN\.FILE\.SUB)[\s|\(]+(?<filename>.*)\s*,\s*(?<to>\S+)\s*,";
         private readonly string READ_COMMAND =
-            @"^\s*(?<command>MATREAD|READSEQ|READ[VUL]*)\s+(?<variable>[^\s]+)\s*FROM\s*(?<handle>[\.'\d\w]+)(?<isarray>\(\S+\))\s*,*.*\n";
+            @"^\s*(?<command>MATREAD|READSEQ|READ[VUL]*)\s+(?<variable>.+)\s*FROM\s*(?<handle>[\.'\d\w]+)(?<isarray>\(\S+\))?\s*,?.*\n";
 //        private readonly string WRITE_COMMAND =
 //            @"\s*(?<command>WRITE[VUL]*|WRITESEQ)\s+((?<variable>\S+)\s*)\s*(TO|ON)+\s*((?<handle>[\.'\d\w]+)\s*,)?\s*(?<recordid>\S*)\s*(ELSE.*\n|THEN.*\n|.*\n)";
 //        private readonly string WRITE_COMMAND =
 //            @"\s* (?<command>WRITE[VUL]*|WRITESEQ)\s+((?<variable>.+)\s*)\s* (TO|ON)+\s* ((?<handle>[\.'\d\w]+)\s*,)?\s*(?<recordid>\S*)\s*(ELSE.*\n|THEN.*\n|.*\n)";
         private readonly string WRITE_COMMAND =
-            @"^\s*(?<command>MATWRITE|WRITESEQ|WRITE[VUL]*)\s+(?<variable>[^\s]+)\s*(TO|ON)+\s* ((?<handle>[\.'\d\w]+)\s*)(?<isarray>\(\S+\)),*.*\n";
+            @"^\s*(?<command>MATWRITE|WRITESEQ|WRITE[VUL]*)\s+(?<variable>.+)\s*(ON|TO)+\s* ((?<handle>[\.'\d\w]+)\s*)(?<isarray>\(\S+\))?,?.*\n";
 
 
 
@@ -131,7 +132,7 @@ namespace csl_pbanalysis
             foreach (Match match in matches)
             {
                 var groups = match.Groups;
-                string command = groups["command"].Value;
+                string command = groups["command"].Value.Trim();
                 switch (command.ToUpper())
                 {
                     case "OPEN":
@@ -153,6 +154,7 @@ namespace csl_pbanalysis
                     case "CALL":
                     case "CHAIN":
                     case "INCLUDE":
+                    case "$INCLUDE":
                     case "EXECUTE":
                     case "ENTER":
                     case "PROGRAM":
@@ -197,10 +199,10 @@ namespace csl_pbanalysis
             // Parse the string and pick out the relevant information
             var match = rgxOpenCommand.Match(text);
             var groups = match.Groups;
-            string dict = groups["dict"].Value;
-            string filename = groups["filename"].Value;
-            string isArray = groups["isarray"].Value;
-            string to = groups["to"].Value;
+            string dict = groups["dict"].Value.Trim();
+            string filename = groups["filename"].Value.Trim();
+            string isArray = groups["isarray"].Value.Trim();
+            string to = groups["to"].Value.Trim();
 
             _log.Debug("Found OPEN|OPENSEQ statement for filename {0}, dict: {1}, handle: {2}", filename, dict, to);
 
@@ -285,9 +287,10 @@ namespace csl_pbanalysis
             // Parse the string and pick out the relevant information
             var match = pattern.Match(text);
             var groups = match.Groups;
-            string command = groups["command"].Value;
-            string variable = groups["variable"].Value;
-            string handle = groups["handle"].Value;
+            string command = groups["command"].Value.Trim();
+            string variable = groups["variable"].Value.Trim();
+            string handle = groups["handle"].Value.Trim();
+            string isArray = groups["isarray"].Value.Trim();
 
             _log.Debug("Found {0} statement for handle {1}, variable: {2}", command, handle, variable);
 
@@ -295,6 +298,15 @@ namespace csl_pbanalysis
             if (match.Success)
             {
                 string filename;
+
+                // Ignore the filename if it is an array
+                if (!isArray.Equals(""))
+                {
+                    // Skip this statement as it is using an array for the file handle
+                    _log.Info("Found array as handle so skipping statement. The statement found is {0}", text);
+                    return;
+                }
+
 
                 // Check for use of the default file
                 if (handle.Equals(""))
@@ -369,8 +381,8 @@ namespace csl_pbanalysis
             // Parse the string and pick out the relevant information
             var match = rgxExternalCommand.Match(text);
             var groups = match.Groups;
-            string command = groups["command"].Value;
-            string externalLink = groups["external_link"].Value;
+            string command = groups["command"].Value.Trim();
+            string externalLink = groups["external_link"].Value.Trim();
 
             _log.Debug("Found external statement for command: {0}, external_link: {1}", command, externalLink);
 
@@ -388,6 +400,7 @@ namespace csl_pbanalysis
                         case "CALL":
                         case "CHAIN":
                         case "INCLUDE":
+                        case "$INCLUDE":
                         case "EXECUTE":
                         case "ENTER":
                         case "PROGRAM":
