@@ -50,19 +50,35 @@ namespace csl_pbanalysis
         #region Instance variables
         private string _programName;
         private readonly string FILE_COMMANDS =
-            @"^\s*(?<command>(OPEN|READ[VUL]*|WRITE[VUL]*))\s+.*\n";
+            @"^\s*(?<command>(OPEN|OPENPATH|READ[VULT]*|CALL\s+OPEN\.FILE\.SUB|READSEQ|WRITE[VULT]*|WRITESEQ|EXECUTE|CHAIN|[\$]*INCLUDE|MATREAD[U]?|MATWRITE[U]?|CALL|ENTER|PROGRAM|SYSTEM|OPENSEQ))[\s|\(]+.*\n";
         private readonly string OPEN_COMMAND =
-            @"^\s*OPEN\s+(?<filename>.*)\s+TO\s+(?<to>\S+)";
+            @"^\s*(OPEN|OPENSEQ|OPENPATH)\s+(?<filename>[^\s]+)\s+TO\s+(?<to>[^\s\(\)]+)(?<isarray>\(\S+\))";
+        private readonly string OPEN_FILE_SUB_COMMAND =
+            @"^\s*(CALL\s+OPEN\.FILE\.SUB)[\s|\(]+(?<filename>.*)\s*,\s*(?<to>\S+)\s*,";
         private readonly string READ_COMMAND =
-            @"\s*(?<command>READ[VUL]*)\s+((?<variable>[\.'\d\w]+)\s*)\s*FROM\s*((?<handle>[\.'\d\w]+)\s*,)?\s*(?<recordid>\S*)\s*(ELSE.*\n|THEN.*\n|.*\n)";
+            @"^\s*(?<command>MATREAD|READSEQ|READ[VUL]*)\s+(?<variable>[^\s]+)\s*FROM\s*(?<handle>[\.'\d\w]+)(?<isarray>\(\S+\))\s*,*.*\n";
+//        private readonly string WRITE_COMMAND =
+//            @"\s*(?<command>WRITE[VUL]*|WRITESEQ)\s+((?<variable>\S+)\s*)\s*(TO|ON)+\s*((?<handle>[\.'\d\w]+)\s*,)?\s*(?<recordid>\S*)\s*(ELSE.*\n|THEN.*\n|.*\n)";
+//        private readonly string WRITE_COMMAND =
+//            @"\s* (?<command>WRITE[VUL]*|WRITESEQ)\s+((?<variable>.+)\s*)\s* (TO|ON)+\s* ((?<handle>[\.'\d\w]+)\s*,)?\s*(?<recordid>\S*)\s*(ELSE.*\n|THEN.*\n|.*\n)";
         private readonly string WRITE_COMMAND =
-            @"\s*(?<command>WRITE[VUL]*)\s+((?<variable>\S+)\s*)\s*(TO|ON)+\s*((?<handle>[\.'\d\w]+)\s*,)?\s*(?<recordid>\S*)\s*(ELSE.*\n|THEN.*\n|.*\n)";
+            @"^\s*(?<command>MATWRITE|WRITESEQ|WRITE[VUL]*)\s+(?<variable>[^\s]+)\s*(TO|ON)+\s* ((?<handle>[\.'\d\w]+)\s*)(?<isarray>\(\S+\)),*.*\n";
+
+
+
+
+
+        private readonly string EXTERNAL_DEPENDENCY_COMMAND =
+            @"\s*(?<command>CALL|CHAIN|[\$]*INCLUDE|EXECUTE|ENTER|PROGRAM|SYSTEM)\s+(?<external_link>[^\(\s]+)[\s|\(]*";
+
 
         private Regex rgxFileCommands;
         private Regex rgxOpenCommand;
         private Regex rgxReadCommand;
         private Regex rgxWriteCommand;
-        private readonly ILoggingAdapter _log = Logging.GetLogger(Context);
+        private Regex rgxExternalCommand;
+        private Regex rgxCallOpenFileSub;
+        private ILoggingAdapter _log;
 
         private readonly string DEFAULT_FILEHANDLE = "__defaultFileHandle";
 
@@ -71,13 +87,23 @@ namespace csl_pbanalysis
         SortedDictionary<string, UniVerseFile> files;
         #endregion
 
+
         public FileReaderActor()
         {
+            _log = Context.GetLogger();
+
+            _log.Info("FileReaderActor HI JON");
+
             // Initialize the patterns used to scan the file for metrics
             rgxFileCommands = new Regex(FILE_COMMANDS, RegexOptions.Compiled | RegexOptions.Multiline);
             rgxOpenCommand = new Regex(OPEN_COMMAND, RegexOptions.Compiled);
             rgxReadCommand = new Regex(READ_COMMAND, RegexOptions.Compiled);
             rgxWriteCommand = new Regex(WRITE_COMMAND, RegexOptions.Compiled);
+            rgxExternalCommand = new Regex(EXTERNAL_DEPENDENCY_COMMAND, RegexOptions.Compiled);
+            rgxCallOpenFileSub = new Regex(OPEN_FILE_SUB_COMMAND, RegexOptions.Compiled);
+
+
+            
 
             Receive<Read>(msg => ReadFile(msg));
         }
@@ -109,7 +135,13 @@ namespace csl_pbanalysis
                 switch (command.ToUpper())
                 {
                     case "OPEN":
+                    case "OPENSEQ":
+                    case "OPENPATH":
                         getOpen(groups[0].Value);
+                        break;
+
+                    case "CALL OPEN.FILE.SUB":
+                        getCallOpenFileSub(groups[0].Value);
                         break;
 
                     case "*":
@@ -118,12 +150,26 @@ namespace csl_pbanalysis
                         // Ignore
                         break;
 
+                    case "CALL":
+                    case "CHAIN":
+                    case "INCLUDE":
+                    case "EXECUTE":
+                    case "ENTER":
+                    case "PROGRAM":
+                    case "SYSTEM":
+                        getExternal(groups[0].Value);
+                        break;
+
                     case "READ":
                     case "READV":
                     case "READVU":
                     case "READVL":
                     case "READU":
                     case "READL":
+                    case "MATREAD":
+                    case "MATREADU":
+                    case "READT":
+                    case "READSEQ":
                         getReadWrite(rgxReadCommand, groups[0].Value);
                         break;
                     case "WRITE":
@@ -132,6 +178,10 @@ namespace csl_pbanalysis
                     case "WRITEL":
                     case "WRITEVU":
                     case "WRITEVL":
+                    case "MATWRITE":
+                    case "MATWRITEU":
+                    case "WRITET":
+                    case "WRITESEQ":
                         getReadWrite(rgxWriteCommand, groups[0].Value);
                         break;
                     default:
@@ -149,9 +199,57 @@ namespace csl_pbanalysis
             var groups = match.Groups;
             string dict = groups["dict"].Value;
             string filename = groups["filename"].Value;
+            string isArray = groups["isarray"].Value;
             string to = groups["to"].Value;
 
-            _log.Debug("Found OPEN statement for filename {0}, dict: {1}, handle: {2}", filename, dict, to);
+            _log.Debug("Found OPEN|OPENSEQ statement for filename {0}, dict: {1}, handle: {2}", filename, dict, to);
+
+            // Check to see if somethign matched otherwise there is an error
+            if (match.Success)
+            {
+                // Ignore the filename if it is an array
+                if (!isArray.Equals(""))
+                {
+                    // Skip this statement as it is using an array for the file handle
+                    _log.Info("Found array as handle so skipping statement. The statement found is {0}", text);
+                    return;
+                }
+
+                // Add the file handle and the file name to the dictionary of open files found
+                if (to.Equals(""))
+                {
+                    // This is a reference to a default file which we need to update so that any read or writes not using a handle will use this
+                    if (!handleToFilenameLookup.TryAdd(DEFAULT_FILEHANDLE, filename))
+                    {
+                        handleToFilenameLookup[DEFAULT_FILEHANDLE] = filename;
+                    }
+                }
+
+                // Add to the list of handles or update if already exists
+                if (!handleToFilenameLookup.TryAdd(to, filename))
+                {
+                    handleToFilenameLookup[to] = filename;
+                }
+
+                // Add the name of the file to the list of files found, ignore if it already exists
+                var universeFile = new UniVerseFile(dict, filename);
+                files.TryAdd(filename, universeFile);
+            }
+            else
+            {
+                _log.Error("Expecting to match an OPEN statement but none found. Something is wrong with the match pattern for the OPEN statement. Text being matched is '{0}", text);
+            }
+        }
+
+        private void getCallOpenFileSub(string text)
+        {
+            // Parse the string and pick out the relevant information
+            var match = rgxCallOpenFileSub.Match(text);
+            var groups = match.Groups;
+            string filename = groups["filename"].Value;
+            string to = groups["to"].Value;
+
+            _log.Debug("Found CALL OPEN.FILE.SUB statement for filename {0}, handle: {1}", filename, to);
 
             // Check to see if somethign matched otherwise there is an error
             if (match.Success)
@@ -173,7 +271,7 @@ namespace csl_pbanalysis
                 }
 
                 // Add the name of the file to the list of files found, ignore if it already exists
-                var universeFile = new UniVerseFile(dict, filename);
+                var universeFile = new UniVerseFile("", filename);
                 files.TryAdd(filename, universeFile);
             }
             else
@@ -236,6 +334,8 @@ namespace csl_pbanalysis
                                 case "READVL":
                                 case "READU":
                                 case "READL":
+                                case "READSEQ":
+                                case "MATREAD":
                                     files[filename].ReadCount++;
                                     break;
                                 case "WRITE":
@@ -244,6 +344,8 @@ namespace csl_pbanalysis
                                 case "WRITEL":
                                 case "WRITEVU":
                                 case "WRITEVL":
+                                case "WRITESEQ":
+                                case "MATWRITE":
                                     files[filename].WriteCount++;
                                     break;
                                 default:
@@ -259,6 +361,82 @@ namespace csl_pbanalysis
                 _log.Error("Expecting to match a READ/WRITE statement but none found. Something is wrong with the match pattern for the READ statement. Text being matched is '{0}", text);
             }
         }
+
+
+        private void getExternal(string text)
+        {
+
+            // Parse the string and pick out the relevant information
+            var match = rgxExternalCommand.Match(text);
+            var groups = match.Groups;
+            string command = groups["command"].Value;
+            string externalLink = groups["external_link"].Value;
+
+            _log.Debug("Found external statement for command: {0}, external_link: {1}", command, externalLink);
+
+            // Check to see if somethign matched otherwise there is an error
+            if (match.Success)
+            {
+                if (externalLink.Equals(""))
+                {
+                    _log.Error("Cannot find external link for command, statement: {0}. command found is: {1}", text, command);
+                }
+                else
+                {
+                    switch (command.ToUpper())
+                    {
+                        case "CALL":
+                        case "CHAIN":
+                        case "INCLUDE":
+                        case "EXECUTE":
+                        case "ENTER":
+                        case "PROGRAM":
+                        case "SYSTEM":
+                            // TODO add action for this item here
+                            break;
+                        default:
+                            _log.Error("Expecting External command and found: {0} in line {1}", command, text);
+                            break;
+                    }
+                }
+
+
+/*
+
+
+
+
+
+
+
+                // Add the file handle and the file name to the dictionary of open files found
+                if (to.Equals(""))
+                {
+                    // This is a reference to a default file which we need to update so that any read or writes not using a handle will use this
+                    if (!handleToFilenameLookup.TryAdd(DEFAULT_FILEHANDLE, filename))
+                    {
+                        handleToFilenameLookup[DEFAULT_FILEHANDLE] = filename;
+                    }
+                }
+
+                // Add to the list of handles or update if already exists
+                if (!handleToFilenameLookup.TryAdd(to, filename))
+                {
+                    handleToFilenameLookup[to] = filename;
+                }
+
+                // Add the name of the file to the list of files found, ignore if it already exists
+                var universeFile = new UniVerseFile(dict, filename);
+                files.TryAdd(filename, universeFile);
+*/
+            }
+            else
+            {
+                _log.Error("Expecting to match an external statement but none found. Something is wrong with the match pattern for the OPEN statement. Text being matched is '{0}", text);
+            }
+        }
+
+
 
     }
 }

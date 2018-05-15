@@ -5,6 +5,7 @@ using System.IO;
 using NLog;
 using NLog.Config;
 using NLog.Targets;
+using Akka.Routing;
 
 namespace csl_pbanalysis
 {
@@ -35,8 +36,12 @@ namespace csl_pbanalysis
             // Create the container for all the actors
             var pbanalysisActorSystem = ActorSystem.Create("pbanalysis", config);
 
-            // Create the that will collected all of the metrics from the files in a given directory
-            Props maProps = Props.Create(() => new MetricsAccumulatorActor());
+            // Create the pool of fileReadActors
+            Props frProps = Props.Create(() => new FileReaderActor()).WithRouter(new RoundRobinPool(1));
+            IActorRef frActor = pbanalysisActorSystem.ActorOf(frProps, "fileReaderActor");
+
+            // Create the actor that will collected all of the metrics from the files in a given directory
+            Props maProps = Props.Create(() => new MetricsAccumulatorActor(frActor));
             IActorRef maActor = pbanalysisActorSystem.ActorOf(maProps, "metricsAccumulatorActor");
             maActor.Tell(new ReadDir(_dirName, _outputFilename));
 
@@ -46,27 +51,26 @@ namespace csl_pbanalysis
         }
 
 
+
+
         private static string GetConfiguration()
         {
             string config = @"
+
                 akka {  
-                    stdout-loglevel = ERROR
+                    log-config-on-start = on
                     loglevel = ERROR
 #                    loggers = [""Akka.Logger.NLog.NLogLogger, Akka.Logger.NLog""]
-                    log-config-on-start = on
 
-                    actor
-                    {
-                      debug
-                      {
-                        receive = on      # log any received message
-                        autoreceive = on  # log automatically received messages, e.g. PoisonPill
-                        lifecycle = on    # log actor lifecycle changes
-                        event-stream = on # log subscription changes for Akka.NET event stream
-                        unhandled = on    # log unhandled messages sent to actors
-                      }
+                    actor {                
+                        debug {  
+                                receive = on 
+                                autoreceive = on
+                                lifecycle = on
+                                event-stream = on
+                                unhandled = on
+                        }
                     }
-                  }
                 }
             ";
 

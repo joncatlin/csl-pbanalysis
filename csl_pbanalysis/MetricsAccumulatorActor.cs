@@ -5,6 +5,7 @@ using Akka.Routing;
 using Akka.Event;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading;
 
 namespace csl_pbanalysis
 {
@@ -23,16 +24,14 @@ namespace csl_pbanalysis
         private readonly string NODES_FILENAME = "nodes.csv";
         private readonly string EDGES_FILENAME = "edges.csv";
 
-        public MetricsAccumulatorActor()
+        public MetricsAccumulatorActor(IActorRef fileReadActorDispatcher)
         {
             _log = Context.GetLogger();
 
-            // Initialize the storage to hols all the results
-            _files = new SortedDictionary<string, SortedDictionary<string, UniVerseFile>>();
+            _fileReadActorDispatcher = fileReadActorDispatcher;
 
-           _fileReadActorDispatcher = Context.ActorOf(Props.Create(() =>
-                new FileReaderActor())
-                .WithRouter(new RoundRobinPool(10)));
+            // Initialize the storage to hold all the results
+            _files = new SortedDictionary<string, SortedDictionary<string, UniVerseFile>>();
 
             Receive<ReadDir>(msg => ReadDir(msg));
             Receive<Finished>(msg => FileReaderFinished(msg));
@@ -40,7 +39,7 @@ namespace csl_pbanalysis
 
         private void ReadDir(ReadDir msg)
         {
-            // Save the name fo the file to hold the results once all actors are finished
+            // Save the name of the file to hold the results once all actors are finished
             _outputFilename = msg.OutputFilename;
 
             _log.Info("Checking directory named: {0} for files", msg.Filename);
@@ -66,6 +65,10 @@ namespace csl_pbanalysis
             if (_files.Count == _foundFilesCount)
             {
                 _log.Info("All actors finished");
+
+                // Wait for a period of time for the loginfo to output
+                Thread.Sleep(10000);
+
                 OutputNodesAndEdges();
                 //OutputResults();
             }
